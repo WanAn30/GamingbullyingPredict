@@ -1,0 +1,142 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, auc
+import shap
+import matplotlib.pyplot as plt
+import logging
+import os
+import joblib
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Ensure output directories exist
+output_dir = "../OUTPUT/XGBoost"
+os.makedirs(output_dir, exist_ok=True)
+
+# Function to load data
+def load_data(input_file, output_file):
+    try:
+        data = pd.read_csv(input_file)
+        output_data = pd.read_csv(output_file)
+        logging.info("Data loaded successfully.")
+        return data, output_data
+    except Exception as e:
+        logging.error(f"Error loading data: {e}")
+        raise
+
+# Function to prepare data
+def prepare_data(data, output_data):
+    X = data.values
+    y = output_data.iloc[:, 0].apply(lambda x: 'YES' if x > 9 else 'NO').values
+    y = np.where(y == 'YES', 1, 0)
+    return X, y
+
+# Function to train model
+def train_model(X_train, y_train):
+    model = xgb.XGBClassifier(eval_metric='logloss')
+    try:
+        model.fit(X_train, y_train)
+        logging.info("Model trained successfully.")
+        return model
+    except Exception as e:
+        logging.error(f"Error training model: {e}")
+        raise
+
+# Function to evaluate model
+def evaluate_model(model, X_test, y_test):
+    try:
+        y_pred = model.predict(X_test)
+        y_pred_proba = model.predict_proba(X_test)[:, 1]
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_pred_proba)
+        logging.info(f"Accuracy: {accuracy:.4f}")
+        logging.info(f"Precision: {precision:.4f}")
+        logging.info(f"Recall: {recall:.4f}")
+        logging.info(f"F1 Score: {f1:.4f}")
+        logging.info(f"AUC-ROC: {roc_auc:.4f}")
+        return y_pred, y_pred_proba, accuracy, precision, recall, f1, roc_auc
+    except Exception as e:
+        logging.error(f"Error during evaluation: {e}")
+        raise
+
+# Function to plot ROC curve
+def plot_roc_curve(model, X, y):
+    plt.figure(figsize=(12, 8))
+    tprs = []
+    aucs = []
+    mean_fpr = np.linspace(0, 1, 100)
+    cv = StratifiedKFold(n_splits=10)
+    for i, (train, test) in enumerate(cv.split(X, y)):
+        model.fit(X[train], y[train])
+        probas_ = model.predict_proba(X[test])
+        fpr, tpr, thresholds = roc_curve(y[test], probas_[:, 1])
+        tprs.append(np.interp(mean_fpr, fpr, tpr))
+        tprs[-1][0] = 0.0
+        roc_auc = auc(fpr, tpr)
+        aucs.append(roc_auc)
+        plt.plot(fpr, tpr, lw=1, alpha=0.3, label=f'ROC fold {i} (AUC = {roc_auc:.2f})')
+
+    plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', alpha=0.8)
+    mean_tpr = np.mean(tprs, axis=0)
+    mean_tpr[-1] = 1.0
+    mean_auc = auc(mean_fpr, mean_tpr)
+    std_auc = np.std(aucs)
+    plt.plot(mean_fpr, mean_tpr, color='b', label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})', lw=2, alpha=0.8)
+    std_tpr = np.std(tprs, axis=0)
+    tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+    tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+    plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=0.2, label='± 1 std. dev.')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC) Curve')
+    plt.legend(loc='lower right')
+    plt.savefig(os.path.join(output_dir, "roc_curve.jpeg"), format='jpeg', dpi=1000)
+    plt.show()
+
+# Function to calculate and plot SHAP values
+def plot_shap_values(model, X, data):
+    explainer = shap.Explainer(model)
+    shap_values = explainer(X)
+    shap_values_abs_mean = np.abs(shap_values.values).mean(axis=0)
+    shap_summary = pd.DataFrame({
+        'Feature': data.columns,
+        'Mean SHAP Value': shap_values_abs_mean
+    })
+    shap_summary_sorted = shap_summary.sort_values(by='Mean SHAP Value', ascending=False)
+    logging.info("SHAP values for features:")
+    logging.info(shap_summary_sorted)
+    plt.figure(dpi=1000)
+    shap.summary_plot(shap_values, features=data, feature_names=data.columns, show=False)
+    plt.savefig(os.path.join(output_dir, "shap_summary_plot.jpeg"), format='jpeg', dpi=1000)
+    plt.figure(dpi=1000)
+    shap.summary_plot(shap_values, features=data, feature_names=data.columns, plot_type="bar", show=False)
+    plt.savefig(os.path.join(output_dir, "shap_feature_importance.jpeg"), format='jpeg', dpi=1000)
+    return shap_summary_sorted
+
+# Function to save results to Excel
+def save_results_to_excel(metrics, shap_summary_sorted, output_path):
+    with pd.ExcelWriter(output_path) as writer:
+        metrics_df = pd.DataFrame([metrics], columns=['Accuracy', 'Precision', 'Recall', 'F1 Score', 'AUC-ROC'])
+        metrics_df.to_excel(writer, sheet_name='Metrics', index=False)
+        shap_summary_sorted.to_excel(writer, sheet_name='SHAP Values', index=False)
+    logging.info(f"Results saved to {output_path}")
+
+# Main execution
+if __name__ == "__main__":
+    input_file = "../Data/XGBoost_selected_features_data.csv"
+    output_file = "../Data/data4_ybl.csv"
+    data, output_data = load_data(input_file, output_file)
+    X, y = prepare_data(data, output_data)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    model = train_model(X_train, y_train)
+    y_pred, y_pred_proba, accuracy, precision, recall, f1, roc_auc = evaluate_model(model, X_test, y_test)
+    plot_roc_curve(model, X, y)
+    shap_summary_sorted = plot_shap_values(model, X, data)
+    joblib.dump(model, os.path.join(output_dir, "xgboost_model.pkl"))
+    save_results_to_excel([accuracy, precision, recall, f1, roc_auc], shap_summary_sorted, os.path.join(output_dir, "results.xlsx"))
