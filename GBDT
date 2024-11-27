@@ -1,0 +1,143 @@
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, roc_curve, auc
+import matplotlib.pyplot as plt
+from sklearn.inspection import permutation_importance
+
+# Read input data
+input_file = "../Data/GBT_selected_features_data.csv"
+data = pd.read_csv(input_file)
+
+# Read output data
+output_file = "../Data/data4_ybl.csv"
+output_data = pd.read_csv(output_file)
+
+# Extract input features and output labels
+X = data.values
+y = output_data.iloc[:, 0].apply(lambda x: "YES" if x > 9 else "NO").values
+
+# Initialize GBT classifier
+gbt = GradientBoostingClassifier()
+
+# Use 10-fold cross-validation to find the model with the highest accuracy
+cv = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+best_accuracy = 0
+best_model = None
+tprs = []
+aucs = []
+mean_fpr = np.linspace(0, 1, 100)
+
+# Plotting ROC curve
+plt.figure(figsize=(12, 8))
+print("Plotting ROC curve...")
+
+for i, (train_index, test_index) in enumerate(cv.split(X, y)):
+    X_train, X_test = X[train_index], X[test_index]
+    y_train, y_test = y[train_index], y[test_index]
+
+    gbt.fit(X_train, y_train)
+    y_pred = gbt.predict(X_test)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    if accuracy > best_accuracy:
+        best_accuracy = accuracy
+        best_model = gbt
+
+    # Compute ROC curve
+    probas_ = gbt.predict_proba(X_test)
+    fpr, tpr, thresholds = roc_curve(y_test, probas_[:, 1], pos_label='YES')
+    tprs.append(np.interp(mean_fpr, fpr, tpr))
+    tprs[-1][0] = 0.0
+    roc_auc = auc(fpr, tpr)
+    aucs.append(roc_auc)
+    plt.plot(fpr, tpr, lw=1, alpha=0.3, label=f'ROC fold {i} (AUC = {roc_auc:.2f})')
+
+plt.plot([0, 1], [0, 1], linestyle='--', lw=2, color='r', alpha=0.8)
+mean_tpr = np.mean(tprs, axis=0)
+mean_tpr[-1] = 1.0
+mean_auc = auc(mean_fpr, mean_tpr)
+std_auc = np.std(aucs)
+plt.plot(mean_fpr, mean_tpr, color='b', label=f'Mean ROC (AUC = {mean_auc:.2f} ± {std_auc:.2f})', lw=2, alpha=0.8)
+
+std_tpr = np.std(tprs, axis=0)
+tprs_upper = np.minimum(mean_tpr + std_tpr, 1)
+tprs_lower = np.maximum(mean_tpr - std_tpr, 0)
+plt.fill_between(mean_fpr, tprs_lower, tprs_upper, color='grey', alpha=0.2, label='± 1 std. dev.')
+
+plt.xlim([-0.05, 1.05])
+plt.ylim([-0.05, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC) Curve')
+plt.legend(loc='lower right')
+plt.tight_layout()
+plt.savefig('../OUTPUT/GBT/roc_curve.jpeg', dpi=1000)
+plt.show()
+
+# Print evaluation metrics
+y_pred_best = best_model.predict(X)
+accuracy = accuracy_score(y, y_pred_best)
+precision = precision_score(y, y_pred_best, pos_label="YES")
+recall = recall_score(y, y_pred_best, pos_label="YES")
+f1 = f1_score(y, y_pred_best, pos_label="YES")
+auc_roc = roc_auc_score(y == "YES", best_model.predict_proba(X)[:, 1])
+
+print(f"Accuracy: {accuracy:.4f}")
+print(f"Precision: {precision:.4f}")
+print(f"Recall: {recall:.4f}")
+print(f"F1 Score: {f1:.4f}")
+print(f"AUC-ROC: {auc_roc:.4f}")
+
+# Save evaluation metrics to Excel
+metrics_df = pd.DataFrame({
+    'Metric': ['Accuracy', 'Precision', 'Recall', 'F1 Score', 'AUC-ROC'],
+    'Score': [accuracy, precision, recall, f1, auc_roc]
+})
+
+# Feature importance evaluation - based on split points
+split_importances = best_model.feature_importances_
+split_importance_df = pd.DataFrame({
+    'Feature': data.columns,
+    'Importance': split_importances
+}).sort_values(by='Importance', ascending=False)
+
+print("Feature Importances (Split Point):")
+print(split_importance_df)
+
+# Feature importance evaluation - based on permutation importance
+perm_importance = permutation_importance(best_model, X, y, n_repeats=10, random_state=42, n_jobs=-1)
+perm_importance_df = pd.DataFrame({
+    'Feature': data.columns,
+    'Importance': perm_importance.importances_mean
+}).sort_values(by='Importance', ascending=False)
+
+print("Feature Importances (Permutation):")
+print(perm_importance_df)
+
+# Save feature importances to Excel
+with pd.ExcelWriter('../OUTPUT/GBT/evaluation_results.xlsx') as writer:
+    metrics_df.to_excel(writer, sheet_name='Metrics', index=False)
+    split_importance_df.to_excel(writer, sheet_name='Split Importances', index=False)
+    perm_importance_df.to_excel(writer, sheet_name='Permutation Importances', index=False)
+
+# Plot feature importance - based on split points
+plt.figure(figsize=(11, 8))
+plt.barh(split_importance_df['Feature'], split_importance_df['Importance'], color='skyblue')
+plt.xlabel('Importance')
+plt.ylabel('Feature')
+plt.title('Feature Importances (Split Point)')
+plt.gca().invert_yaxis()
+plt.savefig('../OUTPUT/GBT/feature_importance_split_point.jpeg', dpi=1000, format='jpeg')
+plt.show()
+
+# Plot feature importance - based on permutation importance
+plt.figure(figsize=(11, 8))
+plt.barh(perm_importance_df['Feature'], perm_importance_df['Importance'], color='skyblue')
+plt.xlabel('Importance')
+plt.ylabel('Feature')
+plt.title('Feature Importances (Permutation)')
+plt.gca().invert_yaxis()
+plt.savefig('../OUTPUT/GBT/feature_importance_permutation.jpeg', dpi=1000, format='jpeg')
+plt.show()
